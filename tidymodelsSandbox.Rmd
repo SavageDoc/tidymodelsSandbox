@@ -1,0 +1,230 @@
+---
+title: "Playing with `tidymodels`"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+This is a brief notebook for exploration of the `tidymodels` package. It's meant to be a self motivated journey, filled with mistakes, questions, and generally a sandbox to experiment with the goal of understanding. Feel free to fork, branch, comment, etc, this GitHub file for your own usage.
+
+## Libraries
+
+First, let's load some libraries...
+
+```{r libraryLoad}
+# tidymodels is the point here
+library( tidymodels )
+# corrplot for correlation plots
+library( corrplot )
+```
+
+## Boston House Price Dataset
+
+For a first cut, I've started with the `Boston` data set from the `MASS` package. I've started here for several reasons:
+
+1. It's a public data set, and the help file contains a data dictionary.  
+2. It's relatively **clean** - all numeric variables (though some are really factors), no missing values, etc.
+3. I've used it before, and will use it again in future presentations. Thus, having some ideas on how to utilise contemporary libraries would suit my ulterior motives.
+
+```{r bostonHousePrice}
+# Load the Boston house price data set from the MASS package
+data( Boston, package='MASS' )
+```
+
+## Overview {.tabset .tabset-pills}
+
+For the analysis, I'd like to complete the following:
+
+1. Do a quick EDA on the variables (this is outside the `tidymodels` paradigm, but useful anyway!).
+2. Select & scale variables for modelling
+3. Split data into training/test for initial model construction, and again for $k$-fold cross validation.
+4. Evaluate models based on training data.
+    * Pick some metrics
+    * Make some visualisations about those metrics
+5. Evaluate models based on test data
+    * Use metrics from above
+    * Use visualisations from above
+6. Given a value for $k$, perform cross validation with some metrics & plots.
+
+### Quick EDA
+
+```{r quickEDA}
+# Use ggplot for density plots
+plotData <- Boston %>%
+  gather( key='Variable', value='Value' )
+
+edaPlot <- ggplot( plotData ) +
+  facet_wrap( ~Variable, scales='free' ) +
+  geom_density( aes( x=Value, colour=Variable, fill=Variable ) ) +
+  theme( legend.position='none' )
+  
+edaPlot
+```
+
+
+...and check out a `corrplot` of the variables:
+
+```{r corrPlot}
+corrplot( cor( Boston )
+          , method = 'pie'
+          , order='hclust'
+          , addrect=3
+          , addCoef.col = 'black'
+          , number.cex=0.7 )
+```
+
+### Data Splitting
+
+```{r dataSplit}
+set.seed( 42 )
+bostonSplit <- initial_split( Boston )
+# Repeat EDA process
+trainPlotData <- bostonSplit %>%
+  training() %>%
+  gather( key='Variable', value='Value' ) 
+
+trainPlot <- ggplot( trainPlotData ) +
+  facet_wrap( ~Variable, scales='free' ) +
+  geom_density( aes( x=Value, colour=Variable, fill=Variable ) ) +
+  theme( legend.position='none' )
+
+trainPlot
+
+corrplot( cor( training( bostonSplit ) )
+          , method = 'pie'
+          , order='hclust'
+          , addrect=3
+          , addCoef.col = 'black'
+          , number.cex=0.7 )
+```
+
+
+### Variable Selection
+
+I'll try a couple selections of variables - first by selecting a few from the `corrplot`, then using the automated `step_corr` option. 
+
+This is where I'm starting the `tidymodels` experience - with the `recipe` terminology. I've included the formula notations here, as well as converting `chas` to a factor. I guess the same could be done to other variables (e.g. `rad`), but one thing at a time!
+
+```{r varSelect}
+myRecipe <- bostonSplit %>%
+  training() %>%
+  recipe( 'medv ~ chas + zn + rm + age' ) %>%
+  # chas is adjecency to Charles river - set this to a factor
+  step_num2factor( chas ) %>%
+
+autoRecipe <- bostonSplit %>%
+  training() %>%
+  recipe( 'medv ~ .' ) %>%
+  # chas is adjecency to Charles river - set this to a factor
+  step_num2factor( chas ) %>%
+  # Be sure not to remove things correlated to the outcome variable!
+  step_corr( all_numeric(), -all_outcomes(), threshold=0.4 ) %>%
+```
+
+### Variable Scaling
+
+With variables selected, scale numeric values to be in the range of $[0,1]$.
+
+```{r varScaling}
+myRecipe <- myRecipe %>%
+  step_range( all_numeric() )
+
+autoRecipe <- autoRecipe %>%
+  step_range( all_numeric() )
+```
+
+Utilise the recipe to scale the training data.
+
+```{r prepTrain}
+myPrep <- prep( myRecipe )
+autoPrep <- prep( autoRecipe )
+```
+
+Get the data back out for verification later.
+
+```{r prepData}
+myPrepData <- juice( myPrep )
+autoPrepData <- juice( autoPrep )
+```
+
+
+### Training
+
+Following preparation -- and with the "juiced" data for comparison -- let's build some models!
+
+```{r modelTrain}
+# Make a SVM object
+svmObject <- svm_rbf( mode='regression', cost=10 )
+
+# Also make a model for regularised regression
+lmObject <- linear_reg(  ) %>%
+  set_engine( 'lm' ) 
+
+# Generic formula 
+genFormula <- as.formula( 'medv ~ .' )
+# Fit GLM and SVM to my variables and the auto correlated variables
+mySVM <- svmObject %>%
+  fit( genFormula, data=myPrepData  )
+
+myLM <-  lmObject %>% 
+  fit( genFormula, data=myPrepData )
+
+autoSVM <- svmObject %>%
+  fit( genFormula, data=autoPrepData )
+
+autoGLM <- glmObject %>% 
+  fit( genFormula, data=autoPrepData )
+
+# Get a summary from the myGLM and autoSVM models
+## ... I don't know how to do this. :(
+```
+
+### Testing
+
+Following building models, let's evaluate some models!
+
+```{r testModels}
+# Do the transformations and data prep on the test data sets
+myTestData <- myPrep %>%
+  bake( testing( bostonSplit ) )
+
+
+## I'm not sure why this doesn't work...
+# autoTestData <- autoPrep %>%
+#   testing( bostonSplit ) %>%
+#   bake()
+
+# But this one does
+autoTestData <- autoPrep %>%
+  bake( testing( bostonSplit ) )
+
+# Generate predictions
+myResultsData <-myTestData %>%
+  bind_cols( mySVM %>%
+  predict( myTestData ) %>%
+  rename( svmPred=.pred ) 
+  ) %>%
+  bind_cols( myGLM %>%
+               predict( myTestData ) %>%
+               rename( lmPred=.pred ) 
+             )
+## Could do this with auto, but won't (for now)
+```
+
+```{r metricSummary}
+myMetrics <- bind_rows( metrics( myResultsData, medv, lmPred ) %>% mutate( model='LM' ) 
+                        , metrics( myResultsData, medv, svmPred ) %>% mutate( model='SVM' ) ) %>%
+  # THere's multiple "select" functions running around - scope it
+  dplyr::select( -.estimator )
+
+metricPlot <- ggplot( myMetrics ) +
+  geom_bar( aes( x=.metric, y=.estimate, fill=model, colour=model ), stat='identity', position='dodge' ) +
+  scale_colour_brewer( type='qual' )
+
+metricPlot
+```
+
+### Cross-validation
+
+TBD...
