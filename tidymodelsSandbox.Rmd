@@ -1,8 +1,8 @@
 ---
 title: "Playing with `tidymodels`"
 output:
-  html_document:
-    df_print: paged
+  html_document: 
+    keep_md: yes
 ---
 
 
@@ -13,6 +13,8 @@ This is a brief notebook for exploration of the `tidymodels` package. It's meant
 First, let's load some libraries...
 
 ```{r libraryLoad}
+# MASS has some conflicts - so load it first!
+library( MASS )
 # tidymodels is the point here
 library( tidymodels )
 # corrplot for correlation plots
@@ -111,7 +113,7 @@ myRecipe <- bostonSplit %>%
   training() %>%
   recipe( 'medv ~ chas + zn + rm + age' ) %>%
   # chas is adjecency to Charles river - set this to a factor
-  step_num2factor( chas ) %>%
+  step_num2factor( chas ) 
 
 autoRecipe <- bostonSplit %>%
   training() %>%
@@ -119,20 +121,14 @@ autoRecipe <- bostonSplit %>%
   # chas is adjecency to Charles river - set this to a factor
   step_num2factor( chas ) %>%
   # Be sure not to remove things correlated to the outcome variable!
-  step_corr( all_numeric(), -all_outcomes(), threshold=0.4 ) %>%
+  step_corr( all_numeric(), -all_outcomes(), threshold=0.4 ) 
+
+fullRecipe <- bostonSplit %>%
+  training() %>%
+  recipe( 'medv ~ .' ) %>%
+  step_num2factor( chas )
 ```
 
-### Variable Scaling
-
-With variables selected, scale numeric values to be in the range of $[0,1]$.
-
-```{r varScaling}
-myRecipe <- myRecipe %>%
-  step_range( all_numeric() )
-
-autoRecipe <- autoRecipe %>%
-  step_range( all_numeric() )
-```
 
 Utilise the recipe to scale the training data.
 
@@ -155,7 +151,9 @@ Following preparation -- and with the "juiced" data for comparison -- let's buil
 
 ```{r modelTrain}
 # Make a SVM object
-svmObject <- svm_rbf( mode='regression', cost=10 )
+svmObject <- svm_rbf( mode='regression', cost=10 ) %>%
+  # Set the engine for clarity (Note there's only one as of this writing)
+  set_engine( 'kernlab' )
 
 # Also make a model for regularised regression
 lmObject <- linear_reg(  ) %>%
@@ -173,7 +171,7 @@ myLM <-  lmObject %>%
 autoSVM <- svmObject %>%
   fit( genFormula, data=autoPrepData )
 
-autoGLM <- glmObject %>% 
+autoGLM <- lmObject %>% 
   fit( genFormula, data=autoPrepData )
 
 # Get a summary from the myGLM and autoSVM models
@@ -205,7 +203,7 @@ myResultsData <-myTestData %>%
   predict( myTestData ) %>%
   rename( svmPred=.pred ) 
   ) %>%
-  bind_cols( myGLM %>%
+  bind_cols( myLM %>%
                predict( myTestData ) %>%
                rename( lmPred=.pred ) 
              )
@@ -227,4 +225,49 @@ metricPlot
 
 ### Cross-validation
 
-TBD...
+**Not keeping the md file seems to crash this for me. If it crashes on knitting, try keeping the markdown file.**
+
+I found an article on Medium that has a good intro to CV with `tidymodels`. I've leveraged that in the below, only splitting the full data set rather than the training set.
+
+```{r crossValidation, cache=FALSE, results='asis'}
+crossValData <- vfold_cv( Boston, v=10 ) %>%
+  # Rename the values to include the fact that I'll be using them for cross validation
+  rename( cvSplit=splits, cvID=id )
+
+# Build a list of test cases
+fullCVData <- bind_rows(
+  crossValData %>% mutate( cvRecipe=list( autoRecipe ), cvModel=list( svmObject ), modelName='autoSVM' )
+  , crossValData %>% mutate( cvRecipe=list( autoRecipe ), cvModel=list( lmObject ), modelName='autoLM' )
+  , crossValData %>% mutate( cvRecipe=list( myRecipe ), cvModel=list( lmObject ), modelName='myLM' )
+  , crossValData %>% mutate( cvRecipe = list( myRecipe ), cvModel=list( svmObject ), modelName='mySVM' )
+)
+
+# Build a function to evaluate the parts - note the names in the function match the names in the list!
+cvFun <- function( cvSplit, cvID, cvRecipe, cvModel, modelName='Default' ){
+  # Note that this takes a single recipe (at a time)
+  prepRecipe <- cvSplit %>% training() %>% prep( x=cvRecipe, training=. )
+  trainData <- cvSplit %>% training() %>% bake( prepRecipe, new_data=. )
+  testData <- cvSplit %>% testing() %>% bake( prepRecipe, new_data=. )
+  
+  modelObject <- cvModel %>% fit( formula( prepRecipe ), data=trainData )
+  
+  testResults <- modelObject %>% predict( new_data=testData ) %>% bind_cols( testData  )
+  
+  testMetrics <- testResults %>%
+    metrics( medv, .pred ) %>%
+    dplyr::select( -.estimator ) %>%
+    mutate( ID=cvID, Name=modelName )
+  
+  return( testMetrics )
+}
+
+# Get the results through mapping
+fullCVResults <- pmap_dfr( fullCVData, cvFun ) %>%
+  # Get rid of pesky dots
+  rename_all( list( ~sub( pattern='.', replacement='', fixed=TRUE, x=. ) ) )
+
+cvPlot <- ggplot( fullCVResults ) +
+  geom_boxplot( aes( x=metric, y=estimate, colour=Name ), position='dodge' )
+
+cvPlot
+```
