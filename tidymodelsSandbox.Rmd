@@ -111,9 +111,11 @@ This is where I'm starting the `tidymodels` experience - with the `recipe` termi
 ```{r varSelect}
 myRecipe <- bostonSplit %>%
   training() %>%
-  recipe( 'medv ~ chas + zn + rm + age' ) %>%
+  recipe( 'medv ~ chas + dis + rm + age' ) %>%
   # chas is adjecency to Charles river - set this to a factor
-  step_num2factor( chas ) 
+  step_num2factor( chas ) %>% 
+  # Normalise all numeric variables
+  step_range( all_numeric(), -all_outcomes() ) 
 
 autoRecipe <- bostonSplit %>%
   training() %>%
@@ -151,31 +153,29 @@ Following preparation -- and with the "juiced" data for comparison -- let's buil
 
 ```{r modelTrain}
 # Make a SVM object
-svmObject <- svm_rbf( mode='regression', cost=10 ) %>%
+svmObject <- svm_rbf( mode='regression', cost=10, rbf_sigma=5 ) %>%
   # Set the engine for clarity (Note there's only one as of this writing)
-  set_engine( 'kernlab' )
+  # I've also been setting more and more options, trying to reproduce the model with juiced data
+  # (see Verification section, below...)
+  set_engine( 'kernlab', type='eps-svr', kernel='rbfdot', scaled=FALSE, tol=1e-6, shrinking=FALSE )
 
 # Also make a model for regularised regression
 lmObject <- linear_reg(  ) %>%
   set_engine( 'lm' ) 
 
-# Generic formula 
-genFormula <- as.formula( 'medv ~ .' )
 # Fit GLM and SVM to my variables and the auto correlated variables
+set.seed( 42 )
 mySVM <- svmObject %>%
-  fit( genFormula, data=myPrepData  )
+  fit( formula( myPrep ), data=myPrepData  )
 
 myLM <-  lmObject %>% 
-  fit( genFormula, data=myPrepData )
+  fit( formula( myPrep ), data=myPrepData )
 
 autoSVM <- svmObject %>%
-  fit( genFormula, data=autoPrepData )
+  fit( formula( autoPrep ), data=autoPrepData )
 
 autoGLM <- lmObject %>% 
-  fit( genFormula, data=autoPrepData )
-
-# Get a summary from the myGLM and autoSVM models
-## ... I don't know how to do this. :(
+  fit( formula( autoPrep ), data=autoPrepData )
 ```
 
 ### Testing
@@ -239,7 +239,7 @@ fullCVData <- bind_rows(
   crossValData %>% mutate( cvRecipe=list( autoRecipe ), cvModel=list( svmObject ), modelName='autoSVM' )
   , crossValData %>% mutate( cvRecipe=list( autoRecipe ), cvModel=list( lmObject ), modelName='autoLM' )
   , crossValData %>% mutate( cvRecipe=list( myRecipe ), cvModel=list( lmObject ), modelName='myLM' )
-  , crossValData %>% mutate( cvRecipe = list( myRecipe ), cvModel=list( svmObject ), modelName='mySVM' )
+  , crossValData %>% mutate( cvRecipe=list( myRecipe ), cvModel=list( svmObject ), modelName='mySVM' )
 )
 
 # Build a function to evaluate the parts - note the names in the function match the names in the list!
@@ -270,4 +270,55 @@ cvPlot <- ggplot( fullCVResults ) +
   geom_boxplot( aes( x=metric, y=estimate, colour=Name ), position='dodge' )
 
 cvPlot
+```
+
+## Verification
+
+I've saved off the data from `juice` - so to ensure I understand what's happening, I'll use those data directly to fit the models, make predictions, etc.
+
+```{r verifyResults}
+## Recall the "juiced" data
+# myPrepData
+# autoPrepData
+
+# Work on a copy
+myPrepData1 <- myPrepData
+
+## Fit the model
+myJuicedLM <- lm( formula( myPrep ), data=myPrepData )
+myPrepData1$predJuiceLM <- fitted( myJuicedLM )
+myPrepData1$predLM <- predict( myLM, new_data = myPrepData )$.pred
+# Getting at the coefficients is a bit cumbersome...
+all.equal( coef( myJuicedLM ), myLM$fit$coefficients )
+# Check the outcome data
+all.equal( myPrepData1$predJuiceLM, myPrepData1$predLM, check.names=FALSE )
+
+# Similar for SVM
+# I've gone through a number of iterations, setting more and more of the function internals.
+# I still can't reproduce the tidymodel formula exactly - but I've gotten under 0.5%!
+set.seed( 42 )
+# Here's what (should?) be the equivalent of the tidymodel/parsnip object
+myJuicedSVM <- kernlab::ksvm( formula( myPrep )
+                              , data=myPrepData
+                              , type='eps-svr'
+                              , kernel='rbfdot'
+                              , C=10
+                              , kpar=list( sigma=5 )
+                              , scaled=FALSE
+                              , shrinking=FALSE
+                              , tol=1e-6 )
+
+# Generate predictions
+# Juiced data
+myPrepData1$predJuiceSVM <- kernlab::predict( myJuicedSVM, newdata=myPrepData %>% select( -medv ), type='response' )[,1]
+# From the parsnip data
+myPrepData1$predSVM <- predict( mySVM, new_data=myPrepData %>% select( -medv ) )$.pred
+# Get some summary information
+myPrepData2 <- myPrepData1 %>%
+  mutate( svmDiff=predJuiceSVM - predSVM
+          , absSVMDiff=abs( svmDiff )
+          , APE=absSVMDiff/medv 
+          , stringAPE=scales::percent( APE ) ) %>%
+  arrange( desc( APE ) )
+knitr::kable( head( myPrepData2 ) )
 ```
